@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#141414">
+<title>РоллМерж — собери пиццу!</title>
+<script src="https://cdn.jsdelivr.net/npm/phaser-ce@2/build/phaser.min.js" onerror="window.__noPhaser=1"></script>
+<style>
+  html,body{margin:0;background:#141414;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:Georgia,serif}
+  #gameDiv{border-radius:12px;box-shadow:0 0 40px rgba(224,32,32,.35)}
+  #gameDiv canvas{max-width:100vw;max-height:100vh;height:auto}
+  #shopBtn{display:none;margin-top:10px;padding:12px 22px;background:#e02020;color:#fff;border:none;border-radius:24px;font-size:17px;cursor:pointer}
+  #topBar{display:flex;justify-content:flex-end;gap:8px;padding:6px 10px;width:400px;max-width:100vw;box-sizing:border-box}
+  .ctlBtn{background:rgba(0,0,0,.4);color:#fff;border:1px solid #e02020;border-radius:50%;width:38px;height:38px;font-size:16px;cursor:pointer}
+  #err{display:none;margin:10px;padding:12px;background:#5a1010;color:#ffd0d0;border-radius:8px;font-size:14px;max-width:380px}
+</style>
+</head>
+<body>
+<div style="position:relative">
+  <div id="topBar">
+    <button id="fsBtn" class="ctlBtn" onclick="goFull()" title="На весь экран">⛶</button>
+    <button id="muteBtn" class="ctlBtn" onclick="toggleMute()" title="Звук">♪</button>
+  </div>
+  <div id="gameDiv"></div>
+</div>
+<button id="shopBtn" onclick="location.href='https://ролл-экспресс.рф'">Заказать на ролл-экспресс.рф</button>
+<div id="err"></div>
+<script>
+window.onerror = function(msg, src, l){ var d=document.getElementById('err'); if(d){ d.style.display='block'; d.textContent='Ошибка: '+msg+' (строка '+l+')'; } };
+
+if (typeof Phaser === 'undefined' || window.__noPhaser) {
+  var d=document.getElementById('err'); d.style.display='block';
+  d.textContent='Библиотека движка не загрузилась. Проверьте интернет и обновите страницу.';
+} else {
+
+// ===== Настройки =====
+var W = 400, H = 700, LINE_Y = 130;
+var LV = [
+ {r:14, c1:'#ff7a7a', c2:'#c81a1a', n:'Тобико'},
+ {r:19, c1:'#fff6e8', c2:'#e8cba0', n:'Мини-ролл'},
+ {r:26, c1:'#fff2d8', c2:'#d8a860', n:'Классика'},
+ {r:34, c1:'#ffd9a0', c2:'#e07820', n:'Запечённый'},
+ {r:44, c1:'#ffb0a0', c2:'#e05038', n:'Филадельфия'},
+ {r:55, c1:'#ffcf70', c2:'#e09010', n:'Дракон'},
+ {r:68, c1:'#fff0f0', c2:'#e84860', n:'Сет'},
+ {r:83, c1:'#ffe9a8', c2:'#e8a020', n:'Пицца 5 сыров'},
+ {r:95, c1:'#ffe9a8', c2:'#e8a020', n:'Пицца XXL'},
+ {r:99, c1:'#ffe9a8', c2:'#e8a020', n:'Мега-пицца'}
+];
+
+// ===== Три этапа одной партии (сложность растёт, меню выбора нет) =====
+// drop  — вероятности выпадения уровней 0-4 (в сумме 100): на Этапе 1 крупные не сыплются,
+// их надо заработать слияниями. Этап 3 настроен под ~1 победу из 10 партий.
+// mergeF — щедрость слияния (1.0 = только вплотную, выше = «навылет»).
+// dangerMax — сколько кадров состав может висеть у линии до проигрыша (60 кадров = 1 сек).
+var STAGES = [
+ {title:'Этап 1 · Разминка', drop:[55,45,0,0,0],  mergeF:1.14, dropMs:460, dangerMax:150},
+ {title:'Этап 2 · Жара',     drop:[46,34,13,7,0], mergeF:1.08, dropMs:530, dangerMax:100},
+ {title:'Этап 3 · Пекло',    drop:[40,26,15,11,8],mergeF:1.04, dropMs:600, dangerMax:65}
+];
+var DROP_W = STAGES[0].drop, MERGE_F = STAGES[0].mergeF;
+// Цель этапа: Этап 1 — собрать Пиццу (как было), Этап 2 — на ступень длиннее (Пицца XXL),
+// Этап 3 — ещё на ступень длиннее (Мега-пицца). Выпадение и физика не меняются — растёт цепочка.
+var WIN_LV = [7,8,9];
+
+// ===== Промокоды на финале (выпадает случайный один из трёх) =====
+// ЗАМЕНИТЕ условия/ссылки на актуальные перед публикацией!
+var PROMOS = [
+  { code:'КАМИН',  link:'https://xn----jtbocaqlcgida3m.xn--p1ai/',
+    cond:'При заказе от 2699 ₽ — ролл «Магуро Лайт» в подарок!' },
+  { code:'ОСЕНЬ',  link:'https://xn----jtbocaqlcgida3m.xn--p1ai/',
+    cond:'При заказе от 2699 ₽ — ролл «Горячая Европа» в подарок!' },
+  { code:'2ПЛЮС1', link:'https://xn----jtbocaqlcgida3m.xn--p1ai/catalog/picca-33-sm',
+    cond:'При заказе двух любых пицц 33 см — третья пицца «Маргарита» 25 см в подарок!' }
+];
+var PROMO = PROMOS[0]; // выбранный промокод текущей партии, переопределяется в финале
+
+function pickLevel(){
+  var r = Math.random()*100, s = 0;
+  for(var i=0;i<DROP_W.length;i++){ s += DROP_W[i]; if(r < s) return i; }
+  return 0;
+}
+var game, sprites = [], score = 0, best = +localStorage.getItem('rm_best') || 0;
+var nextLevel = 0, canDrop = true, danger = 0, over = false, lineG = null;
+var TAU = Math.PI*2;
+// Состояние всей партии: этап, собранные кусочки (0-3), выбранная пицца
+var ST = { stage:0, pieces:0, pizzaIdx:0 };
+
+// Названия пицц из меню ролл-экспресс.рф + «начинки» для отрисовки:
+// pep = кружочки, chunk = квадратики, leaf = листики базилика
+var PIZZA_NAMES = ['Пепперони','Ветчина с грибами','5 сыров','Карбонара','Маргарита','Охотничья','Гавайская','Барбекю','Аппетитная','Колбасная'];
+var TOPS = {
+ 'Пепперони':         [['#d84828','pep']],
+ 'Ветчина с грибами': [['#e8a088','chunk'],['#8a5a30','pep']],
+ '5 сыров':           [['#f8e8a0','chunk'],['#e8c840','chunk'],['#e8e8f8','chunk']],
+ 'Карбонара':         [['#b8683a','chunk'],['#f8f0d8','chunk']],
+ 'Маргарита':         [['#d84828','pep'],['#5a8a3a','leaf']],
+ 'Охотничья':         [['#8a4a2a','pep'],['#3a3a3a','pep']],
+ 'Гавайская':         [['#f8d040','chunk'],['#e8a088','chunk']],
+ 'Барбекю':           [['#7a2a10','chunk'],['#e8b860','chunk']],
+ 'Аппетитная':        [['#d84828','pep'],['#5a8a3a','leaf'],['#f8d040','chunk']],
+ 'Колбасная':         [['#a85040','pep']]
+};
+var playStart = 0;
+
+// ===== Звук: эффекты =====
+var AC = null, muted = false, musicStarted = false, noiseBuf = null;
+function audio(){
+  if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return null; } }
+  if(AC && AC.state === 'suspended' && AC.resume){ try{ AC.resume(); }catch(e){} }
+  return AC;
+}
+// Мобильные браузеры блокируют звук до первого касания — будим движок на любом тапе
+window.addEventListener('pointerdown', function(){ audio(); }, true);
+function tone(f, t, dur, type, vol){
+  if(muted) return;
+  try{ var a = audio(), o = a.createOscillator(), g = a.createGain();
+  o.type = type||'sine'; o.frequency.value = f;
+  g.gain.setValueAtTime(vol||.15, a.currentTime+t);
+  g.gain.exponentialRampToValueAtTime(.001, a.currentTime+t+dur);
+  o.connect(g); g.connect(a.destination); o.start(a.currentTime+t); o.stop(a.currentTime+t+dur);}catch(e){}
+}
+function toneAt(f, t, dur, type, vol){
+  if(muted) return;
+  try{ var a = audio(), o = a.createOscillator(), g = a.createGain();
+  o.type = type||'sine'; o.frequency.value = f;
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(.001, t+dur);
+  o.connect(g); g.connect(a.destination); o.start(t); o.stop(t+dur);}catch(e){}
+}
+function getNoise(){
+  if(noiseBuf) return noiseBuf;
+  var a = audio(); noiseBuf = a.createBuffer(1, a.sampleRate*0.08, a.sampleRate);
+  var ch = noiseBuf.getChannelData(0);
+  for(var i=0;i<ch.length;i++) ch[i] = Math.random()*2-1;
+  return noiseBuf;
+}
+function hat(t, vol){
+  if(muted) return;
+  try{ var a = audio(), s = a.createBufferSource(), g = a.createGain(), f = a.createBiquadFilter();
+  s.buffer = getNoise(); f.type='highpass'; f.frequency.value = 6000;
+  g.gain.setValueAtTime(vol||.04, t); g.gain.exponentialRampToValueAtTime(.001, t+.06);
+  s.connect(f); f.connect(g); g.connect(a.destination); s.start(t); s.stop(t+.08);}catch(e){}
+}
+function kick(t){
+  if(muted) return;
+  try{ var a = audio(), o = a.createOscillator(), g = a.createGain();
+  o.type='sine'; o.frequency.setValueAtTime(130, t); o.frequency.exponentialRampToValueAtTime(45, t+.12);
+  g.gain.setValueAtTime(.2, t); g.gain.exponentialRampToValueAtTime(.001, t+.14);
+  o.connect(g); g.connect(a.destination); o.start(t); o.stop(t+.15);}catch(e){}
+}
+function popSnd(l){ tone(300+l*60, 0, .18, 'triangle', .2); tone(600+l*80, .02, .12, 'sine', .1); }
+
+// ===== Победная фанфара (авторская, героическая — как финальный аккорд платформера) =====
+function playFanfare(){
+  if(muted) return;
+  try{
+    var t0 = audio().currentTime + 0.05;
+    // труба (квадрат): восходящий ход и triumphant финал
+    var lead = [
+      [392.0, 0.00, .13],[523.3, 0.16, .13],[659.3, 0.32, .13],[784.0, 0.48, .45],
+      [659.3, 1.05, .14],[784.0, 1.22, .60],
+      [880.0, 2.00, .16],[1046.5,2.18, .70],
+      [784.0, 3.05, .20],[659.3, 3.28, .20],[1046.5,3.52, .95]
+    ];
+    for(var i=0;i<lead.length;i++) toneAt(lead[i][0], t0+lead[i][1], lead[i][2], 'square', .11);
+    // бас (треугольник): C - G - F - C
+    var bass = [[130.8,0.00,.85],[98.0,1.05,.80],[87.3,2.00,.85],[130.8,3.05,1.30]];
+    for(var j=0;j<bass.length;j++) toneAt(bass[j][0], t0+bass[j][1], bass[j][2], 'triangle', .15);
+    // финальный мажорный аккорд
+    toneAt(523.3, t0+3.52, 1.2, 'sine', .06);
+    toneAt(659.3, t0+3.52, 1.2, 'sine', .05);
+    toneAt(784.0, t0+3.52, 1.2, 'sine', .05);
+    kick(t0); kick(t0+.48); kick(t0+1.22); kick(t0+2.18); kick(t0+3.52);
+  }catch(e){}
+}
+
+// ===== Полифоническая музыка: мелодия + бас + ритм, луп 4 такта =====
+function midi(n){ return 440*Math.pow(2,(n-69)/12); }
+var BPM = 132, stepDur = 60/BPM/2, stepI = 0, nextT = 0;
+var leadSeq = [
+ 69,0,72,0,76,0,81,0,  79,0,76,0,72,0,76,0,
+ 65,0,69,0,72,0,77,0,  76,0,72,0,69,0,72,0,
+ 72,0,76,0,79,0,84,0,  83,0,79,0,76,0,79,0,
+ 67,0,71,0,74,0,79,0,  77,0,74,0,71,0,74,0
+];
+var bassSeq = [
+ 45,0,0,0,45,0,0,0,  45,0,0,0,52,0,0,0,
+ 41,0,0,0,41,0,0,0,  48,0,0,0,48,0,0,0,
+ 48,0,0,0,48,0,0,0,  45,0,0,0,45,0,0,0,
+ 43,0,0,0,43,0,0,0,  43,0,0,0,50,0,0,0
+];
+function playStep(i, t){
+  var m = leadSeq[i%64];  if(m) toneAt(midi(m), t, stepDur*.9, 'square', .14);
+  var b = bassSeq[i%64];  if(b) toneAt(midi(b), t, stepDur*1.8, 'triangle', .18);
+  if(i%4===0) kick(t);
+  if(i%2===1) hat(t, .05);
+}
+setInterval(function(){
+  if(muted || over || !musicStarted || !AC) { nextT = AC ? AC.currentTime : 0; return; }
+  while(nextT < AC.currentTime + .2){
+    playStep(stepI, nextT);
+    nextT += stepDur; stepI = (stepI+1)%64;
+  }
+}, 60);
+function startMusic(){ if(musicStarted) return; musicStarted = true; nextT = audio().currentTime + .1; }
+function toggleMute(){ muted = !muted; document.getElementById('muteBtn').textContent = muted ? '✕' : '♪'; }
+
+// ===== Полный экран =====
+function goFull(){
+  var el = document.documentElement;
+  if (document.fullscreenElement || document.webkitFullscreenElement){
+    if (document.exitFullscreen) document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    return;
+  }
+  if (el.requestFullscreen) el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  else if (game.scale && game.scale.startFullScreen){ try{ game.scale.startFullScreen(false); }catch(e){} }
+}
+
+// ===== Еда: canvas2D -> PNG -> загрузчик движка =====
+function makeFoodCanvas(lv){
+  if(lv >= 7) return makeBigPizzaCanvas(lv);
+  var v = LV[lv], r = v.r, pad = 6, S = (r+pad)*2, cx = r+pad;
+  var cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+  var ctx = cv.getContext('2d');
+  ctx.fillStyle = '#241414';
+  ctx.beginPath(); ctx.arc(cx, cx, r+2, 0, TAU); ctx.fill();
+  var g = ctx.createRadialGradient(cx-r*.35, cx-r*.4, r*.2, cx, cx, r);
+  g.addColorStop(0, v.c1); g.addColorStop(1, v.c2);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cx, r, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.55)';
+  for(var i=0;i<7;i++){
+    var a = i*0.9;
+    ctx.beginPath(); ctx.arc(cx+Math.cos(a)*r*0.74, cx+Math.sin(a)*r*0.74, Math.max(2, r*0.12), 0, TAU); ctx.fill();
+  }
+  var ey = cx - r*0.25, ex = r*0.32;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx-ex, ey, Math.max(4, r*0.3), 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx+ex, ey, Math.max(4, r*0.3), 0, TAU); ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath(); ctx.arc(cx-ex+1.5, ey+2, Math.max(2, r*0.14), 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx+ex+1.5, ey+2, Math.max(2, r*0.14), 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#5a2020'; ctx.lineWidth = Math.max(2, r*0.08); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(cx, cx+r*0.05, r*0.35, 0.5, Math.PI-0.5); ctx.stroke();
+  return cv;
+}
+
+// Пицца по названию: корж, сыр, начинка по TOPS, румянец и счастливая улыбка
+function makeNamedPizzaCanvas(idx){
+  var r = LV[7].r, pad = 6, S = (r+pad)*2, cx = r+pad;
+  var cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+  var ctx = cv.getContext('2d');
+  ctx.fillStyle = '#c87c30';
+  ctx.beginPath(); ctx.arc(cx, cx, r, 0, TAU); ctx.fill();
+  var g = ctx.createRadialGradient(cx-r*.3, cx-r*.3, r*.2, cx, cx, r*.9);
+  g.addColorStop(0, '#ffdd7a'); g.addColorStop(1, '#eeae3c');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cx, r*.88, 0, TAU); ctx.fill();
+  var tops = TOPS[PIZZA_NAMES[idx]] || TOPS['Пепперони'];
+  for(var ti=0; ti<tops.length; ti++){
+    ctx.fillStyle = tops[ti][0];
+    var kind = tops[ti][1], off = ti*0.6;
+    for(var k=0;k<8;k++){
+      var a = k*0.85 + off;
+      var px = cx+Math.cos(a)*r*0.6, py = cx+Math.sin(a)*r*0.6;
+      if(kind==='pep'){ ctx.beginPath(); ctx.arc(px, py, Math.max(4, r*0.13), 0, TAU); ctx.fill(); }
+      else if(kind==='chunk'){ ctx.fillRect(px-r*.1, py-r*.1, r*.2, r*.2); }
+      else { ctx.beginPath(); ctx.ellipse(px, py, r*.1, r*.05, a, 0, TAU); ctx.fill(); }
+    }
+  }
+  ctx.fillStyle = 'rgba(255,120,110,.5)';
+  ctx.beginPath(); ctx.arc(cx-r*.62, cx+r*.08, r*.13, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx+r*.62, cx+r*.08, r*.13, 0, TAU); ctx.fill();
+  var ey = cx - r*.18, ex = r*.3;
+  ctx.strokeStyle = '#3a2a1a'; ctx.lineWidth = Math.max(3, r*.07); ctx.lineCap='round';
+  ctx.beginPath(); ctx.arc(cx-ex, ey+2, r*.16, Math.PI*1.15, Math.PI*1.85); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx+ex, ey+2, r*.16, Math.PI*1.15, Math.PI*1.85); ctx.stroke();
+  ctx.lineWidth = Math.max(3, r*.09);
+  ctx.beginPath(); ctx.arc(cx, cx+r*.05, r*.32, 0.4, Math.PI-0.4); ctx.stroke();
+  return cv;
+}
+
+// Большие пиццы-цели: XXL (два кольца начинок) и Мега (золотой корж, три кольца)
+function makeBigPizzaCanvas(lv){
+  var r = LV[lv].r, pad = 6, S = (r+pad)*2, cx = r+pad;
+  var cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+  var ctx = cv.getContext('2d');
+  var mega = lv === 9;
+  ctx.fillStyle = mega ? '#e0a028' : '#c87c30';
+  ctx.beginPath(); ctx.arc(cx, cx, r, 0, TAU); ctx.fill();
+  var g = ctx.createRadialGradient(cx-r*.3, cx-r*.3, r*.2, cx, cx, r*.9);
+  g.addColorStop(0, mega ? '#ffe9a0' : '#ffdd7a'); g.addColorStop(1, mega ? '#f8c040' : '#eeae3c');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cx, r*.88, 0, TAU); ctx.fill();
+  var rings = mega ? [['#d84828','pep'],['#5a8a3a','leaf'],['#f8f0d8','chunk'],['#e8c840','chunk']]
+                   : [['#d84828','pep'],['#f8d040','chunk']];
+  for(var ri=0; ri<rings.length; ri++){
+    ctx.fillStyle = rings[ri][0];
+    var kind = rings[ri][1], rr = r*(0.34 + ri*0.2), cnt = 8 + ri*2;
+    for(var k=0;k<cnt;k++){
+      var a = k*TAU/cnt + ri*0.4;
+      var px = cx+Math.cos(a)*rr, py = cx+Math.sin(a)*rr;
+      if(kind==='pep'){ ctx.beginPath(); ctx.arc(px, py, Math.max(4, r*0.11), 0, TAU); ctx.fill(); }
+      else if(kind==='chunk'){ ctx.fillRect(px-r*.09, py-r*.09, r*.18, r*.18); }
+      else { ctx.beginPath(); ctx.ellipse(px, py, r*.09, r*.045, a, 0, TAU); ctx.fill(); }
+    }
+  }
+  ctx.fillStyle = 'rgba(255,120,110,.5)';
+  ctx.beginPath(); ctx.arc(cx-r*.62, cx+r*.08, r*.13, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx+r*.62, cx+r*.08, r*.13, 0, TAU); ctx.fill();
+  var ey = cx - r*.18, ex = r*.3;
+  ctx.strokeStyle = '#3a2a1a'; ctx.lineWidth = Math.max(3, r*.07); ctx.lineCap='round';
+  ctx.beginPath(); ctx.arc(cx-ex, ey+2, r*.16, Math.PI*1.15, Math.PI*1.85); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx+ex, ey+2, r*.16, Math.PI*1.15, Math.PI*1.85); ctx.stroke();
+  ctx.lineWidth = Math.max(3, r*.09);
+  ctx.beginPath(); ctx.arc(cx, cx+r*.05, r*.32, 0.4, Math.PI-0.4); ctx.stroke();
+  return cv;
+}
+
+// Пицца-чемпион (общий вид — используется и для превью)
+function makePizzaCanvas(){
+  return makeNamedPizzaCanvas(0);
+}
+
+function dotCanvas(color){
+  var dc = document.createElement('canvas'); dc.width = 10; dc.height = 10;
+  var c2 = dc.getContext('2d'); c2.fillStyle = color;
+  c2.beginPath(); c2.arc(5,5,5,0,TAU); c2.fill();
+  return dc.toDataURL();
+}
+
+// ===== Кнопка на игровом поле =====
+function mkBtn(x, y, w, h, label, cb, fill){
+  var g = game.add.graphics(); g.beginFill(fill||0xe02020, 1); g.drawRoundedRect(x-w/2, y-h/2, w, h, h/2); g.endFill();
+  var t = game.add.text(x, y, label, {font:'21px Georgia', fill:'#ffffff'});
+  t.anchor.set(.5);
+  var hit = game.add.sprite(x-w/2, y-h/2, 'dot'); hit.width = w; hit.height = h; hit.alpha = 0;
+  hit.inputEnabled = true;
+  hit.events.onInputDown.add(cb);
+  return hit;
+}
+
+// ===== Стартовый экран: только «Начать игру» =====
+function startRun(){
+  ST.stage = 0; ST.pieces = 0;
+  score = 0;
+  startMusic();
+  ST.pizzaIdx = Math.floor(Math.random()*PIZZA_NAMES.length);
+  game.state.start('Play');
+}
+var Start = {
+  create: function(){
+    game.stage.setBackgroundColor('#141414');
+    var t1 = game.add.text(W/2, 190, 'РоллМерж', {font:'46px Georgia', fill:'#ffd050', stroke:'#5a1010', strokeThickness:8});
+    t1.anchor.set(.5);
+    var t2 = game.add.text(W/2, 250, 'Собери пиццу — ролл за роллом!', {font:'19px Georgia', fill:'#fff8ec'});
+    t2.anchor.set(.5);
+    mkBtn(W/2, 360, 240, 60, 'Начать игру', startRun);
+    var t3 = game.add.text(W/2, 470, 'Три этапа: пиццу надо заработать.\nПройдёшь все — получишь промокод!', {font:'16px Georgia', fill:'#c8b8b8', align:'center'});
+    t3.anchor.set(.5);
+    var t4 = game.add.text(W/2, H-30, 'Рекорд: '+best, {font:'15px Georgia', fill:'#c8b8b8'});
+    t4.anchor.set(.5);
+  }
+};
+
+var Boot = {
+  preload: function(){
+    for(var i=0;i<LV.length;i++) game.load.image('b'+i, makeFoodCanvas(i).toDataURL());
+    for(var i=0;i<PIZZA_NAMES.length;i++) game.load.image('p'+i, makeNamedPizzaCanvas(i).toDataURL());
+    game.load.image('dot',  dotCanvas('#ffffff'));
+    game.load.image('dotR', dotCanvas('#ff9090'));
+    game.load.image('dotY', dotCanvas('#ffe9a8'));
+    game.load.image('dotC', dotCanvas('#ffe9a8'));
+  },
+  create: function(){
+    // Масштабирование под любой экран + полноэкранный режим
+    game.scale.scaleMode = Phaser.ScaleManager.SHOW_ALL;
+    game.scale.pageAlignHorizontally = true;
+    game.scale.pageAlignVertically = true;
+    game.scale.fullScreenScaleMode = Phaser.ScaleManager.SHOW_ALL;
+    window.addEventListener('resize', function(){ if(game.scale) game.scale.refresh(); });
+    window.addEventListener('orientationchange', function(){ setTimeout(function(){ if(game.scale) game.scale.refresh(); }, 300); });
+    var missing = [];
+    for(var i=0;i<LV.length;i++){ if(!game.cache.checkImageKey('b'+i)) missing.push('b'+i); }
+    if(!game.cache.checkImageKey('dot')) missing.push('dot');
+    if(missing.length){
+      var d = document.getElementById('err'); d.style.display='block';
+      d.textContent = 'Не загрузились текстуры: '+missing.join(', ');
+      return;
+    }
+    game.state.start('Start');
+  }
+};
+
+var Play = {
+  create: function(){
+    game.time.events.removeAll();
+    over = false; danger = 0; sprites = []; canDrop = true; nextLevel = 0;
+    var st = STAGES[ST.stage]; DROP_W = st.drop; MERGE_F = st.mergeF; this.cfg = st;
+    BPM = 132 + ST.stage*9; stepDur = 60/BPM/2;
+    document.getElementById('shopBtn').style.display = 'none';
+    document.getElementById('shopBtn').textContent = 'Заказать на ролл-экспресс.рф';
+    game.stage.setBackgroundColor('#141414');
+    game.physics.startSystem(Phaser.Physics.P2JS);
+    game.physics.p2.gravity.y = 1300;
+    game.physics.p2.restitution = .15;
+    var mkWall = function(x,y,w,h){ var b = game.physics.p2.createBody(x,y,0,true); b.setRectangle(w,h); };
+    mkWall(-15, H/2, 40, H*3); mkWall(W+15, H/2, 40, H*3); mkWall(W/2, H+15, W*2, 40);
+    var cup = game.add.graphics(); cup.beginFill(0x2a1e1e, .55); cup.drawRect(10, LINE_Y, W-20, H-LINE_Y-8); cup.endFill();
+    lineG = game.add.graphics(); lineG.lineStyle(3, 0xe02020, .8);
+    lineG.moveTo(10, LINE_Y); lineG.lineTo(W-10, LINE_Y);
+    game.add.text(16, 14, 'РоллМерж', {font:'26px Georgia', fill:'#fff8ec'});
+    this.scoreTxt = game.add.text(W-16, 12, '', {font:'24px Georgia', fill:'#ffd0d0'});
+    this.scoreTxt.anchor.set(1,0); this.bestTxt = game.add.text(W-16, 38, '', {font:'14px Georgia', fill:'#c8b8b8'}); this.bestTxt.anchor.set(1,0);
+    this.timeTxt = game.add.text(16, 38, '', {font:'14px Georgia', fill:'#c8b8b8'});
+    this.stageTxt = game.add.text(16, 62, st.title, {font:'15px Georgia', fill:'#ffd050'});
+    game.add.text(W-16, 84, 'Цель: '+LV[WIN_LV[ST.stage]].n, {font:'14px Georgia', fill:'#ffd050'}).anchor.set(1,0);
+    this.pieceTxt = game.add.text(W-16, 62, '', {font:'15px Georgia', fill:'#ffd050'}); this.pieceTxt.anchor.set(1,0);
+    playStart = game.time.now;
+    this.prev = game.add.sprite(W/2, 92, 'b0'); this.prev.anchor.set(.5);
+    game.input.addMoveCallback(this.move, this);
+    game.input.onDown.add(this.drop, this);
+    this.updateScore();
+  },
+  move: function(p){ if(canDrop && !over){ this.prev.x = Phaser.Math.clamp(p.x, LV[nextLevel].r+12, W-LV[nextLevel].r-12); } },
+  drop: function(p){
+    if(over || !canDrop) return; canDrop = false;
+    startMusic();
+    var lv = nextLevel, v = LV[lv];
+    var s = game.add.sprite(Phaser.Math.clamp(p.x, v.r+12, W-v.r-12), 92, 'b'+lv);
+    game.physics.p2.enable(s); s.body.setCircle(v.r); s.body.angularDamping = .6; s.level = lv;
+    sprites.push(s);
+    nextLevel = pickLevel();
+    this.prev.loadTexture('b'+nextLevel); tone(500, 0, .1, 'sine', .1);
+    game.time.events.add(this.cfg.dropMs, function(){ canDrop = true; }, this);
+  },
+  update: function(){
+    var el = (game.time.now - playStart)/1000;
+    this.timeTxt.text = '⏱ ' + Math.floor(el/60) + ':' + ('0' + Math.floor(el%60)).slice(-2);
+    if(over) return;
+    for(var i=0;i<sprites.length;i++){ var a = sprites[i]; if(!a.alive) continue;
+      for(var j=i+1;j<sprites.length;j++){ var b = sprites[j]; if(!b.alive) continue;
+        if(a.level===b.level){
+          var dx=a.x-b.x, dy=a.y-b.y, rr=LV[a.level].r+LV[b.level].r;
+          if(dx*dx+dy*dy < rr*rr*MERGE_F){ this.merge(a,b); }
+        }
+      }
+    }
+    var bad = false;
+    sprites.forEach(function(s){ if(s.alive && s.body && s.body.velocity.y<8 && s.y - LV[s.level].r < LINE_Y && s.y>0) bad = true; });
+    danger = bad ? danger+1 : Math.max(0, danger-2);
+    if(lineG) lineG.alpha = (danger>0) ? (.5 + .5*Math.abs(Math.sin(game.time.now*.01))) : .8;
+    this.pieceTxt.text = 'Кусочки: '+ST.pieces+'/3';
+    if(danger > this.cfg.dangerMax) this.gameOver();
+  },
+  merge: function(a,b){
+    var lv = a.level+1, x = (a.x+b.x)/2, y = (a.y+b.y)/2, rr = LV[a.level].r;
+    a.alive = b.alive = false;
+    a.destroy(); b.destroy();
+    var em = game.add.emitter(x, y, 18); em.makeParticles('dot'); em.setAlpha(1,0,500); em.setScale(rr*.2, 1, rr*.2, 1, 500);
+    em.start(true, 500, null, 16); game.time.events.add(600, function(){ em.destroy(); }, this);
+    game.camera.shake(.015, 120);
+    if(lv >= WIN_LV[ST.stage]){
+      score += 500; this.win(x, y);
+    } else if(lv < LV.length){
+      var s = game.add.sprite(x, y, 'b'+lv); game.physics.p2.enable(s);
+      s.body.setCircle(LV[lv].r); s.body.angularDamping = .6; s.level = lv; sprites.push(s);
+      s.scale.set(.4); game.add.tween(s.scale).to({x:1,y:1}, 260, Phaser.Easing.Back.Out, true);
+      popSnd(lv); score += (lv+1)*10;
+    }
+    this.updateScore();
+  },
+  updateScore: function(){ this.scoreTxt.text = score + ' б.'; this.bestTxt.text = 'Рекорд: ' + best;
+    if(score>best){ best = score; localStorage.setItem('rm_best', best); } },
+  // ===== Победная сцена: кусочек за этап, финал — целая пицца + промокод =====
+  win: function(px, py){
+    over = true;
+    this.prev.visible = false;
+    ST.pieces++;
+    var pizza = game.add.sprite(px, py, 'p'+ST.pizzaIdx); pizza.anchor.set(.5);
+    game.world.bringToTop(pizza);
+    game.add.tween(pizza).to({x:W/2, y:H*0.42}, 700, Phaser.Easing.Back.Out, true);
+    game.add.tween(pizza.scale).from({x:.3,y:.3}).to({x:1.15,y:1.15}, 700, Phaser.Easing.Back.Out, true)
+      .onComplete.add(function(){
+        game.add.tween(pizza).to({angle:12}, 550, Phaser.Easing.Sinusoidal.InOut, true, 0, 9999, true);
+        game.add.tween(pizza.scale).to({x:1.05,y:1.05}, 380, Phaser.Easing.Sinusoidal.InOut, true, 0, 9999, true);
+      });
+    var self = this;
+    this.sparkTimer = game.time.events.loop(450, function(){
+      var em = game.add.emitter(W/2 + (Math.random()*140-70), H*0.42 + (Math.random()*120-60), 12);
+      var kinds = ['dot','dotR','dotY','dotC'];
+      em.makeParticles(kinds[Math.floor(Math.random()*kinds.length)]);
+      em.setAlpha(1,0,700); em.setScale(3,10,3,10,700);
+      em.start(true, 700, null, 12);
+      game.time.events.add(750, function(){ em.destroy(); });
+    });
+    if(ST.stage < 2){
+      // промежуточная победа: кусочек earned
+      var jingle = [523.3,659.3,784.0];
+      for(var k=0;k<jingle.length;k++) tone(jingle[k], k*0.12, .18, 'triangle', .12);
+      game.camera.flash(0xffe9a8, 300);
+      var t1 = game.add.text(W/2, H*0.18, 'Ура! Кусочек пиццы '+ST.pieces+'/3!', {font:'26px Georgia', fill:'#ffd050', stroke:'#5a1010', strokeThickness:5, align:'center'});
+      t1.anchor.set(.5);
+      var t2 = game.add.text(W/2, H*0.18+40, 'Дальше цель: '+LV[WIN_LV[ST.stage+1]].n+' — «'+PIZZA_NAMES[ST.pizzaIdx]+'» всё ближе!', {font:'15px Georgia', fill:'#fff8ec', align:'center'});
+      t2.anchor.set(.5);
+      mkBtn(W/2, H*0.8, 260, 56, '▶ Дальше: '+STAGES[ST.stage+1].title, function(){ ST.stage++; game.state.start('Play'); });
+      mkBtn(W/2, H*0.9, 220, 46, '↻ Начать сначала', function(){ startRun(); }, 0x6a2020);
+    } else {
+      this.finale();
+    }
+  },
+  // ===== Гранд-финал: сборка целой пиццы + промокод =====
+  finale: function(){
+    playFanfare();
+    game.camera.flash(0xffe9a8, 350);
+    var self = this;
+    // три мини-пиццы слетаются с краёв экрана
+    var from = [[-70,H*0.45],[W/2,-70],[W+70,H*0.45]];
+    var minis = [];
+    for(var i=0;i<3;i++){
+      var m = game.add.sprite(from[i][0], from[i][1], 'b7');
+      m.anchor.set(.5); m.scale.set(.55);
+      minis.push(m);
+    }
+    game.add.tween(minis[0]).to({x:W/2, y:H*0.45}, 800, Phaser.Easing.Back.Out, true);
+    game.add.tween(minis[1]).to({x:W/2, y:H*0.45}, 800, Phaser.Easing.Cubic.Out, true);
+    game.add.tween(minis[2]).to({x:W/2, y:H*0.45}, 800, Phaser.Easing.Back.Out, true);
+    game.time.events.add(900, function(){
+      for(var i=0;i<3;i++) minis[i].destroy();
+      // целая пицца вырастает на месте сборки
+      var big = game.add.sprite(W/2, H*0.42, 'p'+ST.pizzaIdx);
+      big.anchor.set(.5); big.scale.set(.2);
+      game.add.tween(big.scale).to({x:1.15,y:1.15}, 500, Phaser.Easing.Back.Out, true);
+      game.add.tween(big).to({angle:8}, 600, Phaser.Easing.Sinusoidal.InOut, true, 400, 9999, true);
+      var t1 = game.add.text(W/2, H*0.15, 'Пицца «'+PIZZA_NAMES[ST.pizzaIdx]+'» готова!', {font:'25px Georgia', fill:'#ffd050', stroke:'#5a1010', strokeThickness:5, align:'center'});
+      t1.anchor.set(.5);
+      var t2 = game.add.text(W/2, H*0.15+34, 'Счёт: '+score+' • Рекорд: '+best, {font:'16px Georgia', fill:'#fff8ec'});
+      t2.anchor.set(.5);
+      // промо-блок: случайный один из трёх
+      PROMO = PROMOS[Math.floor(Math.random()*PROMOS.length)];
+      var by = H*0.58, bw = 380, bh = 186;
+      var bg = game.add.graphics();
+      bg.beginFill(0x3a1212, .95); bg.lineStyle(2, 0xe02020, 1);
+      bg.drawRoundedRect(W/2-bw/2, by, bw, bh, 14); bg.endFill();
+      var p1 = game.add.text(W/2, by+16, 'Ваш промокод за пройденную пиццу:', {font:'14px Georgia', fill:'#fff8ec'});
+      p1.anchor.set(.5);
+      var p2 = game.add.text(W/2, by+46, PROMO.code, {font:'34px Georgia', fill:'#ffd050', stroke:'#5a1010', strokeThickness:4});
+      p2.anchor.set(.5);
+      var p3 = game.add.text(W/2, by+80, PROMO.cond, {font:'13px Georgia', fill:'#fff8ec', align:'center', wordWrap:true, wordWrapWidth:bw-32});
+      p3.anchor.set(.5);
+      var p4 = game.add.text(W/2, by+126, 'Подарок — один на заказ.', {font:'12px Georgia', fill:'#ffd050'});
+      p4.anchor.set(.5);
+      var p5 = game.add.text(W/2, by+146, 'Введите промокод в корзине на ролл-экспресс.рф', {font:'12px Georgia', fill:'#fff8ec'});
+      p5.anchor.set(.5);
+      var bEl = document.getElementById('shopBtn');
+      bEl.textContent = 'Заказать на ролл-экспресс.рф';
+      var link = PROMO.link;
+      bEl.onclick = function(){ location.href = link; };
+      mkBtn(W/2, H*0.9, 250, 54, '↻ Начать сначала', function(){ startRun(); });
+      self.showBtn();
+    });
+  },
+  gameOver: function(){ over = true; tone(300,0,.4,'sawtooth',.2); tone(200,.2,.5,'sawtooth',.2);
+    var t = game.add.text(W/2, H*0.32, 'Стакан полон!\n'+this.cfg.title+' — пицца не собрана', {font:'26px Georgia', fill:'#fff8ec', stroke:'#5a1010', strokeThickness:5, align:'center'});
+    t.anchor.set(.5);
+    var t2 = game.add.text(W/2, H*0.32+80, 'Счёт: '+score+' • Рекорд: '+best, {font:'17px Georgia', fill:'#c8b8b8'});
+    t2.anchor.set(.5);
+    mkBtn(W/2, H*0.6, 250, 54, '↻ Начать сначала', function(){ startRun(); });
+    mkBtn(W/2, H*0.72, 250, 48, '↻ С этого этапа', function(){ game.state.start('Play'); }, 0x6a2020);
+    },
+  showBtn: function(){ document.getElementById('shopBtn').style.display = 'block'; }
+};
+
+game = new Phaser.Game(W, H, Phaser.CANVAS, 'gameDiv');
+game.state.add('Boot', Boot); game.state.add('Start', Start); game.state.add('Play', Play);
+game.state.start('Boot');
+}
+</script>
+</body>
+</html>
